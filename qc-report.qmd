@@ -1,0 +1,194 @@
+---
+title: "Sonde outlier check"
+subtitle: "What was flagged and what was removed"
+date: now
+date-format: "D MMMM YYYY, HH:mm"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+    code-tools: true
+    fig-width: 9
+    fig-height: 4.2
+    fig-dpi: 130
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  results: ""
+---
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(scales)
+
+Sys.setenv(SONDE_QC_ROOT = normalizePath(getwd()))
+source(file.path("R", "utils.R"))
+for (f in c("config.R", "read_data.R", "checks.R", "pipeline.R", "integrity.R", "summary.R", "plots.R")) source(file.path("R", f))
+
+if (!nzchar(params$results)) stop("Pass the results file: quarto render qc-report.qmd -P results:output/<name>/<name>_results.rds")
+res <- readRDS(params$results)
+cfg <- res$cfg
+pct1 <- function(x) sprintf("%.2f%%", x)
+label_of <- function(p) param_config(cfg, p)$label
+theme_set(theme_minimal(base_size = 12) + theme(panel.grid.minor = element_blank(), legend.position = "bottom"))
+
+s <- res$summary
+tot <- s |> summarise(with_data = sum(with_data), removed = sum(removed), review = sum(flagged_for_review), passed = sum(passed))
+period <- range(res$data$time)
+```
+
+## Summary
+
+- **Station file:** `r basename(res$input)`, `r format(period[1], "%Y-%m-%d")` to `r format(period[2], "%Y-%m-%d")`, `r nrow(res$data) |> format(big.mark = ",")` rows at `r cfg$data$step_minutes`-minute steps.
+- **Parameters checked:** `r paste(map_chr(res$params, label_of), collapse = ", ")`. `r format(tot$with_data, big.mark = ",")` readings in all.
+- **Passed:** `r pct1(100 * tot$passed / tot$with_data)`. **Removed:** `r format(tot$removed, big.mark = ",")` readings (`r pct1(100 * tot$removed / tot$with_data)`), set to missing in the cleaned columns. **Flagged for review:** `r format(tot$review, big.mark = ",")` readings (`r pct1(100 * tot$review / tot$with_data)`), kept in the cleaned columns.
+- **Strictness:** `r cfg$strictness` (1 is the settings as written; higher flags more, lower flags less).
+
+```{r}
+#| label: tbl-summary
+#| tbl-cap: "Outcome by parameter. Percentages are of the readings that have a value."
+s |>
+  transmute(Parameter = label, `Readings` = format(with_data, big.mark = ","),
+            Passed = format(passed, big.mark = ","), `% passed` = pct1(pct_passed),
+            Removed = format(removed, big.mark = ","), `% removed` = pct1(pct_removed),
+            `Flagged for review` = format(flagged_for_review, big.mark = ","), `% flagged` = pct1(pct_flagged)) |>
+  kable(align = "lrrrrrrr")
+```
+
+## What was removed and flagged
+
+```{r}
+#| label: tbl-outcomes
+#| tbl-cap: "Every outcome, by parameter. Removed readings are set to missing in the *_clean column; flagged readings are kept but listed for review."
+res$outcomes |>
+  filter(outcome != "Valid") |>
+  mutate(Parameter = map_chr(parameter, label_of), class = factor(class, levels = c("removed", "review", "passed"))) |>
+  arrange(match(parameter, res$params), class, desc(n)) |>
+  transmute(Parameter, Outcome = outcome, Readings = format(n, big.mark = ","), `% of readings` = pct1(pct)) |>
+  kable(align = "llrr")
+```
+
+```{r}
+#| label: fig-outcomes
+#| fig-cap: "Share of each parameter's readings that were removed or flagged, by reason."
+#| fig-height: 3.6
+res$outcomes |>
+  filter(class %in% c("removed", "review"), n > 0) |>
+  mutate(Parameter = factor(map_chr(parameter, label_of), levels = rev(map_chr(res$params, label_of)))) |>
+  ggplot(aes(pct, Parameter, fill = outcome)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(values = outcome_colours(), name = NULL) +
+  scale_x_continuous(labels = label_number(suffix = "%"), expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "Share of readings with a value", y = NULL) +
+  guides(fill = guide_legend(nrow = 2))
+```
+
+### By check
+
+A reading can fail more than one check, so these counts overlap and do not add up to the table above.
+
+```{r}
+#| label: tbl-checks
+#| tbl-cap: "Readings that failed each check (checks can overlap)."
+res$check_table |>
+  mutate(Parameter = map_chr(parameter, label_of)) |>
+  transmute(Parameter, Check = check, Action = action, Readings = format(n_flagged, big.mark = ","), `% of readings` = pct1(pct)) |>
+  kable(align = "lllrr")
+```
+
+## Events
+
+An *event* is a run of consecutive readings with the same flagged outcome. The longest and most extreme are the ones worth looking at first.
+
+```{r}
+#| label: tbl-events
+#| tbl-cap: "The 30 longest flagged or removed events. Baseline is the median of the valid readings in the 24 hours before the event."
+res$events |>
+  filter(!outcome %in% c("Kept: Corroborated event")) |>
+  arrange(desc(hours)) |>
+  slice_head(n = 30) |>
+  transmute(Parameter = map_chr(parameter, label_of), Outcome = outcome,
+            Start = format(start, "%Y-%m-%d %H:%M"), Hours = round(hours, 2),
+            Min = signif(min_value, 4), Max = signif(max_value, 4), `Baseline before` = signif(baseline, 4)) |>
+  kable(align = "llrrrrr")
+```
+
+```{r}
+#| label: kept-note
+kept <- res$events |> filter(outcome == "Kept: Corroborated event")
+if (nrow(kept) > 0) cat("**Kept as real events:** ", nrow(kept), " excursion(s) were matched by a signal in another sensor and were not removed or flagged. They are in `*_events.csv` with the outcome \"Kept: Corroborated event\".\n", sep = "")
+```
+
+## The file
+
+These checks look at the file itself, not the readings. They report only; nothing is changed.
+
+```{r}
+#| label: tbl-file
+#| tbl-cap: "File checks. Status 'check' means it is worth a look."
+res$file_checks |>
+  mutate(Parameter = if_else(parameter == "", "", map_chr(parameter, ~ if (.x %in% names(res$columns)) label_of(.x) else .x))) |>
+  transmute(Check = check, Parameter, Value = value, Status = status, Note = note) |>
+  kable(align = "llrll")
+```
+
+## Plots
+
+For each parameter: the whole record, then the week with the most flagged readings, drawn reading by reading. Use these to judge whether the thresholds suit this station.
+
+```{r}
+#| label: plot-fn
+plot_both <- function(p) {
+  print(plot_overview(res, p))
+  z <- plot_zoom(res, p)
+  if (is.null(z)) cat("\nNo readings were removed or flagged for this parameter.\n") else print(z)
+}
+```
+
+```{r}
+#| label: plot-tabs
+#| results: asis
+tmpl <- c("### {{p}}", "", "```{r}", "#| echo: false", "#| fig-height: 4.2", "plot_both('{{p}}')", "```", "")
+cat("::: {.panel-tabset}\n\n")
+cat(unlist(lapply(res$params, function(p) knitr::knit_child(text = knitr::knit_expand(text = tmpl, p = p), quiet = TRUE))), sep = "\n")
+cat(":::\n")
+```
+
+## Settings used
+
+```{r}
+#| label: tbl-thresholds
+#| tbl-cap: "Thresholds after the strictness scaling. The erratic-period threshold is the value actually applied (estimated from the data when the method is 'auto')."
+res$thresholds |>
+  mutate(Parameter = map_chr(parameter, label_of)) |>
+  transmute(Parameter, `Outlier z` = round(spike_z, 2), `Min. deviation` = signif(spike_min_dev, 3),
+            `Min. deviation, relative` = signif(spike_min_dev_rel, 3), `Erratic threshold` = signif(erratic_threshold, 3),
+            `Flat line (hours)` = round(flat_min_hours, 2)) |>
+  kable(align = "lrrrrr")
+```
+
+The full settings, after merging the defaults with any settings file and command-line overrides, are saved with the results as `*_settings.yml`. Re-run with that file to reproduce this report exactly.
+
+## What the checks are
+
+All checks use the sonde's own readings only. Nothing about flow, tides, weather or other stations is used.
+
+| Check | Looks for | How |
+|---|---|---|
+| Range | Impossible values (error codes, failed sensors) | Outside the minimum and maximum set for the parameter |
+| Outlier | A reading far from its neighbours | Modified z-score on a rolling median and MAD (Iglewicz and Hoaglin 1993), and a minimum absolute or relative difference |
+| Isolated spike | A glitch that returns to normal at once | An outlier run no longer than a set number of hours; removed |
+| Sustained excursion | A longer run of outliers | Kept if another sensor shows a matching change (a real event); otherwise flagged |
+| Erratic period | A long stretch of jumpy readings | Median 15-minute change over a window exceeds a threshold; flagged |
+| Flat line | A stuck sensor | A set number of hours of identical readings; flagged |
+| Rate of change | A step too large to be real | Optional; off unless a maximum change is set |
+
+An excursion longer than the outlier window (3 hours either side by default) is not seen by the outlier check, because the rolling median follows it. Widen `spike.window_hours` to look for longer ones.

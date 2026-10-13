@@ -1,0 +1,115 @@
+# Default settings for the sonde outlier check. Copy this file, change what you need, and pass it with
+#   Rscript run_qc.R my_data.csv --config my_settings.yml
+# A settings file only needs the lines you change: everything else comes from this file. Single settings can
+# also be changed on the command line, for example
+#   Rscript run_qc.R my_data.csv --strictness 1.5 --set turbidity.spike.min_dev=10
+#
+# The checks use the sonde's own readings only: no flow, tide, weather or other stations.
+#
+# HOW STRICT? One dial, `strictness`, scales the sensitivity of the statistical checks together:
+#   1    the settings below, as written
+#   2    twice as sensitive: z, minimum-deviation, jump and rate thresholds are halved, flat lines count after
+#        half as many repeats, and a spike must be twice as clearly matched by another sensor to be kept
+#   0.5  half as sensitive: thresholds doubled, flat lines need twice as many repeats
+# Hard range limits (min, max) are never scaled. Each check can also be turned off (action: off) or set to
+# only flag (action: flag) instead of removing.
+#
+# ACTIONS. `remove` sets the reading to missing in the cleaned column (and records why); `flag` keeps it in the
+# cleaned column but marks it for review; `off` skips the check.
+
+data:
+  timestamp: auto          # column with the date-time, or "auto": date_time, datetime, timestamp, or a date column + time column
+  timestamp_format: auto   # a lubridate order such as "mdy HMS" or "ymd HMS", or "auto" to try common ones
+  timezone: "Etc/GMT+8"    # clock of the file. Etc/GMT+8 is Pacific Standard Time all year (no daylight time)
+  step_minutes: 15         # time between readings; windows below are given in hours and converted with this
+  missing_values: ["", "NA", "NaN", "-9999", "---"]   # text treated as "no reading" before any check
+  columns:                 # which column holds each parameter. "auto" tries common names; use a name to be exact;
+    turbidity: auto        # null (or a parameter that is not in the file) skips that parameter
+    water_temp: auto
+    ph: auto
+    spec_cond: auto
+    dissolved_oxygen: auto
+    chlorophyll: auto
+
+strictness: 1
+
+integrity:                 # file-level checks that report problems but never change the data
+  ramp_rho: 0.8            # a parameter whose rank correlation with time reaches this is reported (a sorted column)
+  max_gap_hours: 6         # gaps in the record longer than this are listed
+
+# Settings every parameter starts from. A block under `parameters` overrides any of these for that parameter.
+defaults:
+  range:                   # readings outside [min, max] cannot be real for this sensor or site
+    action: remove
+  spike:                   # a reading far from its neighbours: modified z-score on a rolling median and MAD
+    action_isolated: remove     # outlier runs of at most isolated_max_hours (a glitch that returns to normal at once)
+    action_sustained: flag      # longer runs, unless another sensor confirms them (corroborate below)
+    window_hours: 3             # looks this far either side for the local median and spread
+    z_thresh: 3.5               # modified z-score above which a reading is an outlier (Iglewicz and Hoaglin 1993)
+    min_dev: 0                  # ...and it must also differ from the local median by at least this much (parameter units)
+    min_dev_rel: 0              # ...or by this fraction of the local median, whichever is larger. Useful where the scale varies
+    isolated_max_hours: 0.5
+    corroborate:                # a sustained excursion that another sensor also shows is treated as a real event and kept
+      with: all                 # "all" other sensors in the file, or a list such as [spec_cond, dissolved_oxygen]
+      z_thresh: 2               # the other sensor needs a modified z-score this large (same rolling window)
+      pad_hours: 0              # also accept a signal this long before or after the run
+  erratic:                 # a long stretch of jumpy readings that the spike check cannot see (its window fills with the disturbance)
+    action: flag
+    window_hours: 12            # median step size is taken over this far either side
+    jump_method: auto           # "fixed": jump_thresh. "auto": jump_multiple times the station's typical step, at least jump_floor
+    jump_thresh: 5              # fixed method: flag when the median 15-minute change exceeds this (parameter units)
+    jump_multiple: 10
+    jump_floor: 5
+  flat:                    # a stuck sensor repeating one value
+    action: flag
+    min_hours: 3                # at least this many hours of identical readings in a row (the floor)
+    min_hours_method: auto      # "fixed": min_hours. "auto": also at least auto_multiple times the station's own natural run length,
+                                # because a sensor that reports to 0.1 C can repeat a value for many hours without being stuck
+    auto_multiple: 2
+    auto_quantile: 0.999        # the natural run length is this quantile of the station's runs of identical readings
+    pad_hours: 6                # flag this much either side too, to catch the stuck stretch around it
+    tolerance: 0                # readings within this of each other count as identical
+  rate:                    # a change between consecutive readings larger than the sensor can physically show
+    action: off
+    max_change: null            # per reading, in parameter units. Set a number and an action to use it
+
+# Parameters and their starting thresholds. The units are the ones your sensor reports. These are starting points
+# for Sacramento-San Joaquin Delta stations: tune them against your own station with the report's flag plots.
+parameters:
+  turbidity:               # FNU or NTU
+    label: Turbidity
+    range: {min: 0, max: 4000}                 # the EXO2 turbidity sensor's rated range
+    spike:
+      min_dev: 5
+      corroborate: {with: [spec_cond, dissolved_oxygen]}   # a real turbidity event (storm, resuspension) usually moves these too
+    erratic: {jump_floor: 5, jump_thresh: 5}
+  water_temp:              # degrees C
+    label: Water temperature
+    range: {min: 5, max: 35}
+    spike: {min_dev: 0.5}
+    erratic: {jump_floor: 0.5, jump_thresh: 0.5}
+    flat: {min_hours: 6}
+  ph:                      # pH units
+    label: pH
+    range: {min: 5.5, max: 10}
+    spike: {min_dev: 0.3}
+    erratic: {jump_floor: 0.3, jump_thresh: 0.3}
+    flat: {min_hours: 6}
+  spec_cond:               # uS/cm at 25 C. Widen max for brackish or tidal stations (Suisun Bay reaches about 41000)
+    label: Specific conductance
+    range: {min: 20, max: 5000}
+    spike: {min_dev: 20, min_dev_rel: 0.05}
+    erratic: {jump_floor: 50, jump_thresh: 50}
+    flat: {min_hours: 6}
+  dissolved_oxygen:        # mg/L
+    label: Dissolved oxygen
+    range: {min: 0, max: 25}
+    spike: {min_dev: 1}
+    erratic: {jump_floor: 1, jump_thresh: 1}
+    flat: {min_hours: 6}
+  chlorophyll:             # ug/L
+    label: Chlorophyll
+    range: {min: 0, max: 400}                  # the EXO2 total algae sensor's range
+    spike: {min_dev: 5, min_dev_rel: 0.3}
+    erratic: {jump_floor: 5, jump_thresh: 5}
+    flat: {min_hours: 6}
