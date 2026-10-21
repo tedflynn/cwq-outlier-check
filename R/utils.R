@@ -9,7 +9,7 @@ qc_root <- function() {
   repeat {
     if (file.exists(file.path(dir, "config", "default.yml"))) return(dir)
     parent <- dirname(dir)
-    if (parent == dir) stop("Could not find the sonde-outlier-check folder (config/default.yml). ",
+    if (parent == dir) stop("Could not find the cwq-outlier-check folder (config/default.yml). ",
                             "Run from inside the repo or set SONDE_QC_ROOT.", call. = FALSE)
     dir <- parent
   }

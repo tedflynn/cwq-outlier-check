@@ -1,4 +1,4 @@
-# sonde-outlier-check
+# cwq-outlier-check
 
 Outlier checks for **one fixed water quality station**. Give it a CSV of 15-minute sonde readings (any or all of turbidity, water temperature, pH, specific conductance, dissolved oxygen, chlorophyll) and it flags suspect readings, removes the ones that cannot be real, and writes a summary of what it found and what it took out.
 
